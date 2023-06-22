@@ -1,0 +1,11 @@
+torch
+# torch-scatter
+# torch-sparse
+# torch-cluster
+# torch-spline-conv
+torch-geometric
+pytorch-lightning
+numpy
+wandb
+tqdm
+open3d
