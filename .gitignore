@@ -1,0 +1,10 @@
+.idea
+.vscode
+lightning_logs/**
+lightning_logs/*
+checkpoints/**
+checkpoints/*
+data/*
+data/**
+**_pycache__**
+wandb/*

@@ -11,6 +11,7 @@ from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import sample_farthest_points
 import open3d
 
+NUM_POINTS = 32
 
 class GraphLayer(pl.LightningModule):
     """
@@ -19,6 +20,7 @@ class GraphLayer(pl.LightningModule):
     in_channel: it depends on the input of this network.
     out_channel: given by ourselves.
     """
+
     def __init__(self, in_channel, out_channel, k=16):
         super(GraphLayer, self).__init__()
         self.k = k
@@ -37,7 +39,7 @@ class GraphLayer(pl.LightningModule):
 
         # Local Max Pooling
         x = torch.max(knn_x, dim=2)[0]  # (B, N, C)
-        
+
         # Feature Map
         x = self.conv(x)
         x = self.bn(x)
@@ -49,6 +51,7 @@ class Encoder(pl.LightningModule):
     """
     Graph based encoder.
     """
+
     def __init__(self):
         super(Encoder, self).__init__()
 
@@ -74,7 +77,9 @@ class Encoder(pl.LightningModule):
         knn_x = index_points(x.permute(0, 2, 1), knn_idx)  # (B, N, 16, 3)
         mean = torch.mean(knn_x, dim=2, keepdim=True)
         knn_x = knn_x - mean
-        covariances = torch.matmul(knn_x.transpose(2, 3), knn_x).view(b, n, -1).permute(0, 2, 1)
+        covariances = (
+            torch.matmul(knn_x.transpose(2, 3), knn_x).view(b, n, -1).permute(0, 2, 1)
+        )
         x = x.permute(0, 2, 1)
         x = torch.cat([x, covariances], dim=1)  # (B, 12, N)
 
@@ -82,7 +87,6 @@ class Encoder(pl.LightningModule):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
-
 
         # two consecutive graph layers
         x = self.graph_layer1(x)
@@ -111,7 +115,7 @@ class FoldingLayer(pl.LightningModule):
             in_channel = oc
         out_layer = nn.Conv1d(in_channel, out_channels[-1], 1)
         layers.append(out_layer)
-        
+
         self.layers = nn.Sequential(*layers)
 
     def forward(self, grids, codewords):
@@ -125,7 +129,7 @@ class FoldingLayer(pl.LightningModule):
         x = torch.cat([grids, codewords], dim=1)
         # shared mlp
         x = self.layers(x)
-        
+
         return x
 
 
@@ -138,13 +142,13 @@ class Decoder(pl.LightningModule):
         super(Decoder, self).__init__()
 
         # Sample the grids in 2D space
-        xx = np.linspace(-0.3, 0.3, 20, dtype=np.float32)
-        yy = np.linspace(-0.3, 0.3, 20, dtype=np.float32)
-        self.grid = np.meshgrid(xx, yy)   # (2, 45, 45)
+        xx = np.linspace(-3, 3, NUM_POINTS, dtype=np.float32)
+        yy = np.linspace(-3, 3, NUM_POINTS, dtype=np.float32)
+        self.grid = np.meshgrid(xx, yy)  # (2, 45, 45)
 
         # reshape
         self.grid = torch.Tensor(self.grid).view(2, -1)  # (2, 45, 45) -> (2, 45 * 45)
-        
+
         self.m = self.grid.shape[1]
 
         self.fold1 = FoldingLayer(in_channel + 2, [512, 512, 3])
@@ -159,88 +163,149 @@ class Decoder(pl.LightningModule):
         # repeat grid for batch operation
 
         grid = self.grid.unsqueeze(0).repeat(batch_size, 1, 1)  # (B, 2, 45 * 45)
-        
+
         # repeat codewords
-        x = x.unsqueeze(2).repeat(1, 1, self.m)            # (B, 512, 45 * 45)
-        
+        x = x.unsqueeze(2).repeat(1, 1, self.m)  # (B, 512, 45 * 45)
+
         # two folding operations
         recon1 = self.fold1(grid, x)
-        recon2 = self.fold2(recon1, x) # (B, 3, 45 * 45)
-        
+        recon2 = self.fold2(recon1, x)  # (B, 3, 45 * 45)
+
         return recon2
 
 
 class AutoEncoder(pl.LightningModule):
-
     def __init__(self):
         super().__init__()
 
         self.encoder = Encoder()
         self.decoder = Decoder()
-        self.classifier = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 7),
-            nn.Softmax(dim=1)
-        )
+        # self.classifier = nn.Sequential(
+        #     nn.Linear(512, 256),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(256, 7),
+        #     nn.Softmax(dim=1)
+        # )
 
     def forward(self, x):
         x = self.encoder(x)
         reconstruction = self.decoder(x)
-        classification = self.classifier(x)
-        return reconstruction, classification
-    
+        # classification = self.classifier(x)
+        return reconstruction  # , classification
+
     def training_step(self, batch, batch_idx) -> STEP_OUTPUT:
         inputs, targets = batch
-        for i in range(inputs.size(0)):
-            if inputs.size(1) > 400:
-                inputs, _ = sample_farthest_points(inputs, K=400)
-        outputs, classification = self(inputs.to(self.device, dtype=torch.float))
-        class_preds = torch.argmax(classification, dim=1)
-        outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
-        targets = torch.nn.functional.one_hot(targets, num_classes=7)
-        classification_loss = torch.nn.functional.binary_cross_entropy(classification, targets.float())
-        reconstruction_loss, _ = chamfer_distance(outputs, inputs.float())
-        self.log('train_loss', classification_loss + reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_classification_loss', classification_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_reconstruction_loss', reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return {'loss': classification_loss + reconstruction_loss, 'classification_loss': classification_loss, 'reconstruction_loss': reconstruction_loss}
+        if inputs.size(1) > NUM_POINTS**2:
+            inputs, _ = sample_farthest_points(inputs, K=NUM_POINTS**2)
+        # outputs, classification = self(inputs.to(self.device, dtype=torch.float))
+        outputs = self(inputs.to(self.device, dtype=torch.float))
+        # class_preds = torch.argmax(classification, dim=1)
+        # outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
+        # targets = torch.nn.functional.one_hot(targets, num_classes=7)
+        # classification_loss = torch.nn.functional.binary_cross_entropy(classification, targets.float())
+        reconstruction_loss, _ = chamfer_distance(outputs.transpose(2, 1), inputs.float())
+        # self.log('train_loss', classification_loss + reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # self.log('train_classification_loss', classification_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # self.log('train_reconstruction_loss', reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # return {'loss': classification_loss + reconstruction_loss, 'classification_loss': classification_loss, 'reconstruction_loss': reconstruction_loss}
+        self.log(
+            "train_loss",
+            reconstruction_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        # self.log('train_classification_loss', classification_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        # self.log('train_reconstruction_loss', reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        return {"loss": reconstruction_loss}
 
-    
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT | None:
         inputs, targets = batch
-        for i in range(inputs.size(0)):
-            if inputs.size(1) > 400:
-                inputs, _ = sample_farthest_points(inputs, K=400)
-        outputs, classification = self(inputs.to(self.device, dtype=torch.float))
-        outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
-        targets = torch.nn.functional.one_hot(targets, num_classes=7)
-        class_preds = torch.argmax(classification, dim=1)
-        classification_loss = torch.nn.functional.binary_cross_entropy(classification, targets.float())
-        reconstruction_loss, _ = chamfer_distance(outputs, inputs.float())
-        self.log('val_loss', classification_loss + reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_classification_loss', classification_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_reconstruction_loss', reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return {'val_loss': classification_loss + reconstruction_loss, 'classification_loss': classification_loss, 'reconstruction_loss': reconstruction_loss}
+        if inputs.size(1) > NUM_POINTS**2:
+            inputs, _ = sample_farthest_points(inputs, K=NUM_POINTS**2)
+        # outputs, classification = self(inputs.to(self.device, dtype=torch.float))
+        outputs = self(inputs.to(self.device, dtype=torch.float))
+        # outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
+        # targets = torch.nn.functional.one_hot(targets, num_classes=7)
+        # class_preds = torch.argmax(classification, dim=1)
+        # classification_loss = torch.nn.functional.binary_cross_entropy(
+        #     classification, targets.float()
+        # )
+        reconstruction_loss, _ = chamfer_distance(outputs.transpose(2, 1), inputs.float())
+        # self.log(
+        #     "val_loss",
+        #     classification_loss + reconstruction_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     logger=True,
+        # )
+        # self.log(
+        #     "val_classification_loss",
+        #     classification_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     logger=True,
+        # )
+        # self.log(
+        #     "val_reconstruction_loss",
+        #     reconstruction_loss,
+        #     on_step=False,
+        #     on_epoch=True,
+        #     prog_bar=True,
+        #     logger=True,
+        # )
+        # return {
+        #     "val_loss": classification_loss + reconstruction_loss,
+        #     "classification_loss": classification_loss,
+        #     "reconstruction_loss": reconstruction_loss,
+        # }
 
-    
+        self.log(
+            "val_loss",
+            reconstruction_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return {"val_loss": reconstruction_loss}
+
     def test_step(self, batch, batch_idx) -> STEP_OUTPUT | None:
         inputs, targets = batch
-        for i in range(inputs.size(0)):
-            if inputs.size(1) > 400:
-                inputs, _ = sample_farthest_points(inputs, K=400)
-        outputs, classification = self(inputs.to(self.device, dtype=torch.float))
-        outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
-        class_preds = torch.argmax(classification, dim=1)
+        if inputs.size(1) > NUM_POINTS**2:
+            inputs, _ = sample_farthest_points(inputs, K=NUM_POINTS**2)
+        # outputs, classification = self(inputs.to(self.device, dtype=torch.float))
+        outputs = self(inputs.to(self.device, dtype=torch.float))
+        # outputs, _ = sample_farthest_points(outputs.transpose(2, 1), K=400)
+        # class_preds = torch.argmax(classification, dim=1)
         targets = torch.nn.functional.one_hot(targets, num_classes=7)
-        classification_loss = torch.nn.functional.binary_cross_entropy(classification, targets.float())
-        reconstruction_loss, _ = chamfer_distance(outputs, inputs.float())
-        self.log('test_loss', classification_loss + reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('test_classification_loss', classification_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        self.log('test_reconstruction_loss', reconstruction_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return {'test_loss': classification_loss + reconstruction_loss, 'classification_loss': classification_loss, 'reconstruction_loss': reconstruction_loss}
+        # classification_loss = torch.nn.functional.binary_cross_entropy(
+        #    classification, targets.float()
+        # )
+        reconstruction_loss, _ = chamfer_distance(outputs.transpose(2, 1), inputs.float())
+        self.log(
+            "test_loss",
+            reconstruction_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        self.log(
+            "test_reconstruction_loss",
+            reconstruction_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return {
+            "test_loss": reconstruction_loss,
+        }
 
-    
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-6)
         return optimizer

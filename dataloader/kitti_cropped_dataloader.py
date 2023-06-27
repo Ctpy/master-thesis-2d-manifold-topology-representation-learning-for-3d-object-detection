@@ -3,7 +3,7 @@ import pytorch_lightning as pl
 from typing import Optional
 from pathlib import Path
 from dataset.kitti_cropped_dataset import KITTICroppedDataset
-
+import numpy as np
 
 class KITTICroppedDataloader(pl.LightningDataModule):
     def __init__(self, data_path: str, batch_size: int = 32) -> None:
@@ -18,9 +18,9 @@ class KITTICroppedDataloader(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
-            train_size = int(len(self.dataset) * 0.8)
-            val_size = int(len(self.dataset) * 0.1) + 1
-            test_size = int(len(self.dataset) * 0.1) + 1
+            train_size = int(np.ceil(len(self.dataset) * 0.8))
+            val_size = int(np.ceil(len(self.dataset) * 0.1))
+            test_size = len(self.dataset) - train_size - val_size
             print(f"train_size: {train_size}")
             print(f"val_size: {val_size}")
             print(f"test_size: {test_size}")

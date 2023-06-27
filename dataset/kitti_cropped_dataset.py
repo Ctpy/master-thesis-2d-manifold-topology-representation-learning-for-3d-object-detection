@@ -8,6 +8,7 @@ from tqdm import tqdm
 import threading
 import enum
 
+
 class KITTIObjectLabel(enum.Enum):
     """
     KITTI Object Label.
@@ -25,7 +26,7 @@ class KITTIObjectLabel(enum.Enum):
 
     def __str__(self) -> str:
         return self.value
-    
+
     @staticmethod
     def from_str(label: str) -> int:
         """
@@ -49,7 +50,6 @@ class KITTIObjectLabel(enum.Enum):
             raise ValueError(f"Unknown label: {label}")
 
 
-
 class KITTICroppedDataset(Dataset):
     """
     KITTI Cropped Dataset.
@@ -64,6 +64,7 @@ class KITTICroppedDataset(Dataset):
         self.label_files: List[Path] = list(self.label_path.glob("*.json"))
         self.point_cloud_files.sort()
         self.label_files.sort()
+        self.classes = ["Car"]  # , 'Pedestrian', 'Cyclist']
         self.threads: List[threading.Thread] = []
         self.lock: threading.Lock = threading.Lock()
         assert len(self.point_cloud_files) == len(
@@ -106,7 +107,7 @@ class KITTICroppedDataset(Dataset):
         num_labels = 0
         for label in tqdm(self.label_files):
             num_points: int = json.load(label.resolve().open("r"))["num_points"]
-            if num_points >= 400:
+            if num_points >= 1024:
                 num_labels += 1
         return num_labels
 
@@ -116,10 +117,10 @@ class KITTICroppedDataset(Dataset):
         tmp_point_cloud_files: List[Path] = []
         tmp_label_files: List[Path] = []
         for i in tqdm(split_indices, desc=f"Thread {thread_id}"):
-            num_points: int = json.load(self.label_files[i].resolve().open("r"))[
-                "num_points"
-            ]
-            if num_points >= 400:
+            data = json.load(self.label_files[i].resolve().open("r"))
+            num_points: int = data["num_points"]
+            label = data["label"]
+            if num_points >= 1024 and label in self.classes:
                 point_cloud_files.append(self.point_cloud_files[i])
                 label_files.append(self.label_files[i])
 

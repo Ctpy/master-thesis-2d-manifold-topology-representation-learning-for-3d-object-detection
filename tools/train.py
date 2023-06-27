@@ -27,7 +27,7 @@ if __name__ == '__main__':
     wandb.login()
     kitti_cropped_dataloader = KITTICroppedDataloader(data_path='data/kitti_cropped', batch_size=1)
     checkpoint_callback = ModelCheckpoint(dirpath='checkpoints', save_top_k=1, verbose=True, monitor='val_loss', mode='min')
-    early_stop_callback = EarlyStopping(monitor='val_loss', patience=10, verbose=True, mode='min')
+    early_stop_callback = EarlyStopping(monitor='val_loss', patience=5, verbose=True, mode='min')
     wandb_logger = WandbLogger(project='foldingnet', name='foldingnet')
     model = AutoEncoder()
     trainer = pl.Trainer(max_epochs=100, accelerator='gpu', logger=wandb_logger, log_every_n_steps=1, callbacks=[checkpoint_callback, early_stop_callback])
